@@ -2,13 +2,14 @@ import tkinter as tk
 from tkinter import ttk
 import mido
 import time
+import json  # Import json module
 
 NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
 class SynthesiaKeyboard(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Synthesia Style Keyboard")
+        self.title("Standlee Player Piano")
         self.geometry("800x400")  # Initial window size
         self.bind("<Configure>", self.on_resize)
 
@@ -18,15 +19,64 @@ class SynthesiaKeyboard(tk.Tk):
         self.active_keys = {}
         self.key_colors = {}  # New dictionary to store original colors
 
+        self.load_window_size()  # Load saved window size
+
         self.draw_keyboard()
         self.midi_output = None
         self.midi_input = None
         self.create_midi_controls()
         self.create_status_labels()
 
+        self.load_midi_ports()  # Load saved MIDI ports
+
+        self.indicator_rect = None  # Initialize the indicator rectangle
+        self.indicator_counter = 0  # Initialize the counter
+        self.indicator_text = None  # Initialize the indicator text
+        self.indicator_color = "green"  # Initialize the indicator color
+        self.create_indicator_rect()  # Create the indicator rectangle
+
+        self.start_time = None  # Initialize start time for round trip calculation
+
+    def create_indicator_rect(self):
+        self.indicator_counter += 1  # Increment the counter
+        width = self.winfo_width()
+        height = self.winfo_height()
+        rect_size = 40  # Size of the rectangle
+        x0 = (width - rect_size) // 2
+        y0 = (height - rect_size) // 2
+        x1 = x0 + rect_size
+        y1 = y0 + rect_size
+        if self.indicator_rect:
+            self.canvas.coords(self.indicator_rect, x0, y0, x1, y1)
+            self.canvas.itemconfig(self.indicator_rect, fill=self.indicator_color)  # Maintain the current color
+        else:
+            self.indicator_rect = self.canvas.create_rectangle(x0, y0, x1, y1, fill=self.indicator_color, outline="white")
+        if self.indicator_text:
+            self.canvas.coords(self.indicator_text, (x0 + x1) // 2, (y0 + y1) // 2)
+        else:
+            self.indicator_text = self.canvas.create_text((x0 + x1) // 2, (y0 + y1) // 2, text=str(self.indicator_counter), fill="white")
+
     def on_resize(self, event):
+        self.save_window_size()  # Save window size on resize
         self.canvas.delete("all")
         self.draw_keyboard()
+        self.create_indicator_rect()  # Recreate the indicator rectangle after drawing the keyboard
+
+    def save_window_size(self):
+        size = {
+            "width": self.winfo_width(),
+            "height": self.winfo_height()
+        }
+        with open("window_size.json", "w") as f:
+            json.dump(size, f)
+
+    def load_window_size(self):
+        try:
+            with open("window_size.json", "r") as f:
+                size = json.load(f)
+                self.geometry(f'{size["width"]}x{size["height"]}')
+        except FileNotFoundError:
+            pass
 
     def draw_keyboard(self):
         width = self.winfo_width()
@@ -45,9 +95,8 @@ class SynthesiaKeyboard(tk.Tk):
             y0 = self.winfo_height() - height
             y1 = self.winfo_height()
             key_id = self.canvas.create_rectangle(x0, y0, x1, y1, fill="white", outline="black")
-            self.canvas.tag_bind(key_id, "<Button-1>", lambda e, k=key_id: self.on_key_click(e, k))
+            self.canvas.tag_bind(key_id, "<ButtonPress-1>", lambda e, k=key_id: self.on_key_click(e, k))
             self.canvas.tag_bind(key_id, "<ButtonRelease-1>", lambda e, k=key_id: self.on_key_release(e, k))
-            self.canvas.tag_bind(key_id, "<Leave>", lambda e, k=key_id: self.on_key_leave(e, k))
             self.active_keys[key_id] = 21 + i  # Assign MIDI note number starting from 21
             self.key_colors[key_id] = "white"  # Store original color
 
@@ -60,9 +109,8 @@ class SynthesiaKeyboard(tk.Tk):
                 y0 = self.winfo_height() - height
                 y1 = y0 + black_key_height
                 key_id = self.canvas.create_rectangle(x0, y0, x1, y1, fill="black", outline="white")
-                self.canvas.tag_bind(key_id, "<Button-1>", lambda e, k=key_id: self.on_key_click(e, k))
+                self.canvas.tag_bind(key_id, "<ButtonPress-1>", lambda e, k=key_id: self.on_key_click(e, k))
                 self.canvas.tag_bind(key_id, "<ButtonRelease-1>", lambda e, k=key_id: self.on_key_release(e, k))
-                self.canvas.tag_bind(key_id, "<Leave>", lambda e, k=key_id: self.on_key_leave(e, k))
                 self.active_keys[key_id] = 21 + 52 + (octave * 5) + black_key_positions.index(pos)  # Assign MIDI note number for black keys
                 self.key_colors[key_id] = "black"  # Store original color
 
@@ -72,9 +120,8 @@ class SynthesiaKeyboard(tk.Tk):
         y0 = self.winfo_height() - height
         y1 = y0 + black_key_height
         key_id = self.canvas.create_rectangle(x0, y0, x1, y1, fill="black", outline="white")
-        self.canvas.tag_bind(key_id, "<Button-1>", lambda e, k=key_id: self.on_key_click(e, k))
+        self.canvas.tag_bind(key_id, "<ButtonPress-1>", lambda e, k=key_id: self.on_key_click(e, k))
         self.canvas.tag_bind(key_id, "<ButtonRelease-1>", lambda e, k=key_id: self.on_key_release(e, k))
-        self.canvas.tag_bind(key_id, "<Leave>", lambda e, k=key_id: self.on_key_leave(e, k))
         self.active_keys[key_id] = 108  # Assign MIDI note number for the last black key
         self.key_colors[key_id] = "black"  # Store original color
 
@@ -89,7 +136,7 @@ class SynthesiaKeyboard(tk.Tk):
         # MIDI Input Dropdown
         self.midi_input_var = tk.StringVar()
         self.midi_input_dropdown = ttk.Combobox(control_frame, textvariable=self.midi_input_var)
-        self.midi_input_dropdown['values'] = mido.get_input_names()
+        self.midi_input_dropdown['values'] = ["None"] + mido.get_input_names()
         self.midi_input_dropdown.grid(row=0, column=1, padx=5, pady=5)
 
         # MIDI Input Status Circle
@@ -104,7 +151,7 @@ class SynthesiaKeyboard(tk.Tk):
         # MIDI Output Dropdown
         self.midi_output_var = tk.StringVar()
         self.midi_output_dropdown = ttk.Combobox(control_frame, textvariable=self.midi_output_var)
-        self.midi_output_dropdown['values'] = mido.get_output_names()
+        self.midi_output_dropdown['values'] = ["None"] + mido.get_output_names()
         self.midi_output_dropdown.grid(row=1, column=1, padx=5, pady=5)
 
         # MIDI Output Status Circle
@@ -116,17 +163,34 @@ class SynthesiaKeyboard(tk.Tk):
         self.midi_output_var.trace("w", self.update_midi_ports)
         self.check_midi_status()
 
+    def save_midi_ports(self):
+        ports = {
+            "input": self.midi_input_var.get(),
+            "output": self.midi_output_var.get()
+        }
+        with open("midi_ports.json", "w") as f:
+            json.dump(ports, f)
+
+    def load_midi_ports(self):
+        try:
+            with open("midi_ports.json", "r") as f:
+                ports = json.load(f)
+                self.midi_input_var.set(ports.get("input", ""))
+                self.midi_output_var.set(ports.get("output", ""))
+        except FileNotFoundError:
+            pass
+
     def create_status_labels(self):
         status_frame = tk.Frame(self, bg="black")
         status_frame.place(relx=0.0, rely=0.0, x=10, y=70, anchor='nw')
 
-        self.key_status_label = tk.Label(status_frame, text="Key Pressed: None", fg="white", bg="black")
+        self.key_status_label = tk.Label(status_frame, text="Key Pressed: None", fg="white", bg="black", width=30, anchor='w')
         self.key_status_label.grid(row=0, column=0, padx=5, pady=5)
 
-        self.midi_status_label = tk.Label(status_frame, text="MIDI Input: None", fg="white", bg="black")
+        self.midi_status_label = tk.Label(status_frame, text="MIDI Input: None", fg="white", bg="black", width=30, anchor='w')
         self.midi_status_label.grid(row=1, column=0, padx=5, pady=5)
 
-        self.round_trip_label = tk.Label(status_frame, text="Round Trip Time: N/A", fg="white", bg="black")
+        self.round_trip_label = tk.Label(status_frame, text="Round Trip Time: N/A", fg="white", bg="black", width=30, anchor='w')
         self.round_trip_label.grid(row=2, column=0, padx=5, pady=5)
 
     def check_midi_status(self):
@@ -141,53 +205,64 @@ class SynthesiaKeyboard(tk.Tk):
     def update_midi_ports(self, *args):
         if self.midi_input:
             self.midi_input.close()
+            self.midi_input = None
         if self.midi_output:
             self.midi_output.close()
+            self.midi_output = None
 
         input_name = self.midi_input_var.get()
         output_name = self.midi_output_var.get()
 
-        if input_name in mido.get_input_names():
+        if input_name != "None" and input_name in mido.get_input_names():
             self.midi_input = mido.open_input(input_name, callback=self.on_midi_input)
-        if output_name in mido.get_output_names():
+        if output_name != "None" and output_name in mido.get_output_names():
             self.midi_output = mido.open_output(output_name)
+
+        self.save_midi_ports()  # Save selected MIDI ports
 
     def on_key_click(self, event, key_id):
         self.canvas.itemconfig(key_id, fill="blue")
+        self.indicator_color = "blue"  # Change indicator color to blue
+        self.canvas.itemconfig(self.indicator_rect, fill=self.indicator_color)  # Change indicator rectangle to blue
         note, octave = self.get_note_and_octave_from_key_id(key_id)
-        velocity = 127  # Set velocity to 127
-        if 0 <= note <= 127 and 0 <= velocity <= 127:
-            self.key_status_label.config(text=f"Key Pressed: {NOTE_NAMES[note % 12]}{octave}, Velocity: {velocity}")
-            if self.midi_output:
-                self.midi_output.send(mido.Message('note_on', note=note, velocity=velocity))
+        if note is not None:
+            velocity = 127  # Set velocity to 127
+            if 0 <= note <= 127 and 0 <= velocity <= 127:
+                self.key_status_label.config(text=f"Key Pressed: {NOTE_NAMES[note % 12]}{octave}, Velocity: {velocity}")
+                if self.midi_output:
+                    self.start_time = time.time()  # Start time for round trip calculation
+                    self.midi_output.send(mido.Message('note_on', note=note, velocity=velocity))
+            self.active_keys[key_id] = note  # Ensure the key remains active
 
     def on_key_release(self, event, key_id):
         original_color = self.key_colors[key_id]  # Use key_colors to get the original color
         self.canvas.itemconfig(key_id, fill=original_color)
+        self.indicator_color = "green"  # Change indicator color to green
+        self.canvas.itemconfig(self.indicator_rect, fill=self.indicator_color)  # Change indicator rectangle to green
         note, _ = self.get_note_and_octave_from_key_id(key_id)
-        if 0 <= note <= 127:
+        if note is not None and 0 <= note <= 127:
             if self.midi_output:
                 self.midi_output.send(mido.Message('note_off', note=note))
+        self.active_keys[key_id] = None  # Deactivate the key
 
     def on_midi_input(self, message):
-        start_time = time.time_ns()
-        if message.type == 'note_on' or message.type == 'note_off':
-            self.midi_status_label.config(text=f"MIDI Input: {message.note}, Velocity: {message.velocity}")
-            round_trip_time = time.time_ns() - start_time
-            self.round_trip_label.config(text=f"Round Trip Time: {round_trip_time} ns")
+        print(message.type)
+        if message.type == 'note_on':
+            note_name = NOTE_NAMES[message.note % 12]
+            octave = (message.note // 12) - 1
+            self.midi_status_label.config(text=f"MIDI Input: {note_name}{octave}, Velocity: {message.velocity}")
+            if self.start_time:
+                round_trip_time_s = time.time() - self.start_time  # Calculate time difference in seconds
+                round_trip_time_ms = round_trip_time_s * 1000  # Convert to milliseconds
+                self.round_trip_label.config(text=f"Round Trip Time: {round_trip_time_ms:.2f} ms")
+                self.start_time = None  # Reset start time
 
     def get_note_and_octave_from_key_id(self, key_id):
-        note = self.active_keys[key_id]
+        note = self.active_keys.get(key_id)
+        if note is None:
+            return None, None
         octave = (note // 12) - 1
         return note, octave
-
-    def on_key_leave(self, event, key_id):
-        original_color = self.key_colors[key_id]  # Use key_colors to get the original color
-        self.canvas.itemconfig(key_id, fill=original_color)
-        note, _ = self.get_note_and_octave_from_key_id(key_id)
-        if 0 <= note <= 127:
-            if self.midi_output:
-                self.midi_output.send(mido.Message('note_off', note=note))
 
 if __name__ == "__main__":
     app = SynthesiaKeyboard()
