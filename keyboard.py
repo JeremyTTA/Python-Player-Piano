@@ -89,7 +89,8 @@ class SynthesiaKeyboard(tk.Tk):
         self.canvas.create_line(0, self.winfo_height() - height - 2, width, self.winfo_height() - height - 2, fill="blue", width=4)
 
         # Draw white keys
-        for i in range(52):
+        white_key_notes = [21, 23, 24, 26, 28, 29, 31, 33, 35, 36, 38, 40, 41, 43, 45, 47, 48, 50, 52, 53, 55, 57, 59, 60, 62, 64, 65, 67, 69, 71, 72, 74, 76, 77, 79, 81, 83, 84, 86, 88, 89, 91, 93, 95, 96, 98, 100, 101, 103, 105, 107, 108]  # MIDI note numbers for white keys starting from A0
+        for i, note in enumerate(white_key_notes):
             x0 = i * white_key_width
             x1 = x0 + white_key_width
             y0 = self.winfo_height() - height
@@ -97,22 +98,24 @@ class SynthesiaKeyboard(tk.Tk):
             key_id = self.canvas.create_rectangle(x0, y0, x1, y1, fill="white", outline="black")
             self.canvas.tag_bind(key_id, "<ButtonPress-1>", lambda e, k=key_id: self.on_key_click(e, k))
             self.canvas.tag_bind(key_id, "<ButtonRelease-1>", lambda e, k=key_id: self.on_key_release(e, k))
-            self.active_keys[key_id] = 21 + i  # Assign MIDI note number starting from 21
+            self.active_keys[key_id] = note  # Assign MIDI note number
             self.key_colors[key_id] = "white"  # Store original color
 
         # Draw black keys
-        black_key_positions = [1, 3, 4, 6, 7, 8]  # Corrected positions of black keys in an octave
-        for octave in range(7):  # 7 full octaves
-            for pos in black_key_positions:
-                x0 = (octave * 7 + pos) * white_key_width - black_key_width / 2
-                x1 = x0 + black_key_width
-                y0 = self.winfo_height() - height
-                y1 = y0 + black_key_height
-                key_id = self.canvas.create_rectangle(x0, y0, x1, y1, fill="black", outline="white")
-                self.canvas.tag_bind(key_id, "<ButtonPress-1>", lambda e, k=key_id: self.on_key_click(e, k))
-                self.canvas.tag_bind(key_id, "<ButtonRelease-1>", lambda e, k=key_id: self.on_key_release(e, k))
-                self.active_keys[key_id] = 21 + 52 + (octave * 5) + black_key_positions.index(pos)  # Assign MIDI note number for black keys
-                self.key_colors[key_id] = "black"  # Store original color
+        black_key_notes = [22, 25, 27, 30, 32, 34, 37, 39, 42, 44, 46, 49, 51, 54, 56, 58, 61, 63, 66, 68, 70, 73, 75, 78, 80, 82, 85, 87, 90, 92, 94, 97, 99, 102, 104, 106]  # MIDI note numbers for black keys
+        black_key_positions = [1, 3, 4, 6, 7, 8]  # Positions of black keys in an octave
+        for i, note in enumerate(black_key_notes):
+            octave = i // 5
+            pos = i % 5
+            x0 = (octave * 7 + black_key_positions[pos]) * white_key_width - black_key_width / 2
+            x1 = x0 + black_key_width
+            y0 = self.winfo_height() - height
+            y1 = y0 + black_key_height
+            key_id = self.canvas.create_rectangle(x0, y0, x1, y1, fill="black", outline="white")
+            self.canvas.tag_bind(key_id, "<ButtonPress-1>", lambda e, k=key_id: self.on_key_click(e, k))
+            self.canvas.tag_bind(key_id, "<ButtonRelease-1>", lambda e, k=key_id: self.on_key_release(e, k))
+            self.active_keys[key_id] = note  # Assign MIDI note number
+            self.key_colors[key_id] = "black"  # Store original color
 
         # Draw the last black key in the 8th octave
         x0 = 7 * 7 * white_key_width + black_key_positions[0] * white_key_width - black_key_width / 2
@@ -184,13 +187,13 @@ class SynthesiaKeyboard(tk.Tk):
         status_frame = tk.Frame(self, bg="black")
         status_frame.place(relx=0.0, rely=0.0, x=10, y=70, anchor='nw')
 
-        self.key_status_label = tk.Label(status_frame, text="Key Pressed: None", fg="white", bg="black", width=30, anchor='w')
+        self.key_status_label = tk.Label(status_frame, text="Key Pressed: None", fg="white", bg="black", width=30, anchor='w', wraplength=300)
         self.key_status_label.grid(row=0, column=0, padx=5, pady=5)
 
-        self.midi_status_label = tk.Label(status_frame, text="MIDI Input: None", fg="white", bg="black", width=30, anchor='w')
+        self.midi_status_label = tk.Label(status_frame, text="MIDI Input: None", fg="white", bg="black", width=30, anchor='w', wraplength=300)
         self.midi_status_label.grid(row=1, column=0, padx=5, pady=5)
 
-        self.round_trip_label = tk.Label(status_frame, text="Round Trip Time: N/A", fg="white", bg="black", width=30, anchor='w')
+        self.round_trip_label = tk.Label(status_frame, text="Round Trip Time: N/A", fg="white", bg="black", width=30, anchor='w', wraplength=300)
         self.round_trip_label.grid(row=2, column=0, padx=5, pady=5)
 
     def check_midi_status(self):
@@ -242,15 +245,17 @@ class SynthesiaKeyboard(tk.Tk):
         note, _ = self.get_note_and_octave_from_key_id(key_id)
         if note is not None and 0 <= note <= 127:
             if self.midi_output:
-                self.midi_output.send(mido.Message('note_off', note=note))
+                self.midi_output.send(mido.Message('note_off', note=note, velocity=0))  # Set velocity to 0
         self.active_keys[key_id] = None  # Deactivate the key
 
     def on_midi_input(self, message):
-        print(message.type)
-        if message.type == 'note_on':
+        
+        if message.type == 'note_on' and message.velocity > 0:
             note_name = NOTE_NAMES[message.note % 12]
             octave = (message.note // 12) - 1
-            self.midi_status_label.config(text=f"MIDI Input: {note_name}{octave}, Velocity: {message.velocity}")
+            velocity = message.velocity
+            print(f"Incoming note_on: {note_name}{octave}, Velocity: {velocity}")  # Print the velocity to the terminal
+            self.midi_status_label.config(text=f"MIDI Input: {note_name}{octave}, Velocity: {velocity}")
             if self.start_time:
                 round_trip_time_s = time.time() - self.start_time  # Calculate time difference in seconds
                 round_trip_time_ms = round_trip_time_s * 1000  # Convert to milliseconds
@@ -262,6 +267,7 @@ class SynthesiaKeyboard(tk.Tk):
         if note is None:
             return None, None
         octave = (note // 12) - 1
+        return note, octave
         return note, octave
 
 if __name__ == "__main__":
