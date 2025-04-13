@@ -63,6 +63,14 @@ class SynthesiaKeyboard(tk.Tk):
         # Add this after loading ports
         self.after(100, self.update_midi_ports)  # Auto-connect on startup
 
+        # Add hover label with large font
+        self.hover_label = tk.Label(self, 
+                               text="Hover: None", 
+                               fg="white", 
+                               bg="black", 
+                               font=('TkDefaultFont', 14, 'bold'))
+        self.hover_label.place(relx=0.5, rely=0.02, anchor='n')
+
     def create_indicator_rect(self):
         self.indicator_counter += 1  # Increment the counter
         width = self.winfo_width()
@@ -212,6 +220,42 @@ class SynthesiaKeyboard(tk.Tk):
                               bg="gray", fg="black", width=10, font=('TkDefaultFont', 9, 'bold'))
         self.test_button.grid(row=2, column=4, padx=5, pady=5)
 
+        # Add Clear button next to Test button
+        self.clear_button = tk.Button(control_frame, text="Clear", command=self.clear_table,
+                              bg="gray", fg="black", width=10, font=('TkDefaultFont', 9, 'bold'))
+        self.clear_button.grid(row=2, column=5, padx=5, pady=5)  # Place after Test button
+
+        # Add Note Off button next to Clear button
+        self.note_off_button = tk.Button(control_frame, text="Note Off", command=self.send_all_notes_off,
+                              bg="gray", fg="black", width=10, font=('TkDefaultFont', 9, 'bold'))
+        self.note_off_button.grid(row=2, column=6, padx=5, pady=5)  # Place after Clear button
+
+        # Add velocity slider after the delay controls
+        velocity_frame = tk.Frame(control_frame, bg="black")
+        velocity_frame.grid(row=3, column=0, columnspan=6, padx=5, pady=5, sticky='ew')
+        
+        velocity_label = tk.Label(velocity_frame, text="Velocity:", fg="white", bg="black", font=('TkDefaultFont', 12))
+        velocity_label.pack(side=tk.LEFT, padx=5)
+        
+        self.velocity_value = tk.IntVar(value=100)  # Default to 100%
+        self.velocity_slider = ttk.Scale(
+            velocity_frame, 
+            from_=0, 
+            to=100,
+            orient='horizontal',
+            variable=self.velocity_value,
+            length=200
+        )
+        self.velocity_slider.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        
+        # Add percentage label that updates with slider
+        self.velocity_percent = tk.Label(velocity_frame, text="100%", fg="white", bg="black", font=('TkDefaultFont', 12))
+        self.velocity_percent.pack(side=tk.LEFT, padx=5)
+        
+        # Bind slider to update percentage label
+        self.velocity_slider.bind('<Motion>', self.update_velocity_label)
+        self.velocity_slider.bind('<ButtonRelease-1>', self.update_velocity_label)
+
     def validate_delay(self, value):
         if value == "": return True
         try:
@@ -238,16 +282,38 @@ class SynthesiaKeyboard(tk.Tk):
             pass
 
     def create_status_labels(self):
-        status_frame = tk.Frame(self,height=100, bg="black")
-        status_frame.place(relx=0.50, rely=0.02, anchor='n')  # Place below table
+        status_frame = tk.Frame(self, height=100, bg="black")
+        status_frame.place(relx=0.98, rely=0.02, anchor='ne')  # Changed from 0.50 to 0.98 and 'n' to 'ne'
 
-        self.key_status_label = tk.Label(status_frame, text="Key Pressed: None", fg="white", bg="black", width=30, anchor='w', wraplength=300)
+        # Increased width and font size for better visibility
+        label_font = ('TkDefaultFont', 12)
+        label_width = 35
+
+        self.key_status_label = tk.Label(status_frame, 
+                                        text="Key Pressed: None", 
+                                        fg="white", bg="black", 
+                                        width=label_width, 
+                                        anchor='e',  # Changed from 'w' to 'e' for right alignment
+                                        wraplength=300,
+                                        font=label_font)
         self.key_status_label.grid(row=0, column=0, padx=5, pady=5)
 
-        self.midi_status_label = tk.Label(status_frame, text="MIDI Input: None", fg="white", bg="black", width=30, anchor='w', wraplength=300)
+        self.midi_status_label = tk.Label(status_frame, 
+                                        text="MIDI Input: None", 
+                                        fg="white", bg="black", 
+                                        width=label_width, 
+                                        anchor='e',  # Changed from 'w' to 'e' for right alignment
+                                        wraplength=300,
+                                        font=label_font)
         self.midi_status_label.grid(row=1, column=0, padx=5, pady=5)
 
-        self.round_trip_label = tk.Label(status_frame, text="Round Trip Time: N/A", fg="white", bg="black", width=30, anchor='w', wraplength=300)
+        self.round_trip_label = tk.Label(status_frame, 
+                                        text="Round Trip Time: N/A", 
+                                        fg="white", bg="black", 
+                                        width=label_width, 
+                                        anchor='e',  # Changed from 'w' to 'e' for right alignment
+                                        wraplength=300,
+                                        font=label_font)
         self.round_trip_label.grid(row=2, column=0, padx=5, pady=5)
 
     def check_midi_status(self): 
@@ -304,7 +370,7 @@ class SynthesiaKeyboard(tk.Tk):
         self.canvas.itemconfig(self.indicator_rect, fill=self.indicator_color)  # Change indicator rectangle to blue
         note = self.active_keys.get(key_id)
         if note is not None:
-            velocity = 127  # Set velocity to 127
+            velocity = self.get_velocity()  # Use slider value instead of fixed 127
             if 0 <= note <= 127 and 0 <= velocity <= 127:
                 self.pressed_keys.add(key_id)  # Add key to pressed keys
                 octave = (note // 12) - 1
@@ -365,49 +431,53 @@ class SynthesiaKeyboard(tk.Tk):
         self.table_frame = tk.Frame(self, bg="grey", relief="raised", borderwidth=1)
         self.update_table_position()
 
-        # Increase columns and reduce rows per column for better fit
-        num_columns = 6  # Changed from 4 to 6
-        rows_per_column = 15  # Changed from 22 to 15
+        # Increase columns and adjust rows per column
+        num_columns = 8  # Increased from 6 to 8
+        rows_per_column = 11  # Adjusted from 15 to 11 to fit all 88 keys
 
-        # Configure grid columns to be equal and compact
+        # Configure grid columns to be equal with increased width
         for i in range(num_columns):
-            self.table_frame.grid_columnconfigure(i, weight=1, minsize=130)  # Set minimum column width
+            self.table_frame.grid_columnconfigure(i, weight=1, minsize=150)  # Increased from 130 to 150
 
-        # Compact header labels
-        header_text = "Note|MIDI|V|RT"  # Shortened header text
+        # Header labels with larger font
+        header_text = "Note|MIDI|V|RT"
         for col in range(num_columns):
             header = tk.Label(self.table_frame, text=header_text,
-                            fg="black", bg="grey", anchor='w',
-                            font=("TkDefaultFont", 8, 'bold'))
-            header.grid(row=0, column=col, sticky='w', padx=2, pady=1)  # Reduced padding
+                             fg="black", bg="grey", anchor='w',
+                             font=("TkDefaultFont", 12, 'bold'))  # Increased from 8 to 12
+            header.grid(row=0, column=col, sticky='w', padx=3, pady=2)  # Slightly increased padding
 
-        # Create more compact note rows
+        # Create note rows with larger font
         self.note_list_rows = []
         for i in range(88):
             midi_note = i + 21
             note_name = NOTE_NAMES[midi_note % 12]
             octave = (midi_note // 12) - 1
             
-            # Create compound label with different styles
             row_frame = tk.Frame(self.table_frame, bg="black")
-            row_frame.grid(row=i % rows_per_column + 1, column=i // rows_per_column, sticky='w', padx=2, pady=0)
+            row_frame.grid(row=i % rows_per_column + 1, column=i // rows_per_column, 
+                          sticky='w', padx=3, pady=1)
             
             # Note name in bold blue
             note_label = tk.Label(row_frame, text=f"{note_name}{octave}", 
-                                fg="blue", bg="grey", font=("TkDefaultFont", 8, "bold"))
+                                fg="blue", bg="grey", 
+                                font=("TkDefaultFont", 12, "bold"))  # Increased from 8 to 12
             note_label.pack(side=tk.LEFT)
             
             # Separator
-            tk.Label(row_frame, text="|", fg="black", bg="grey").pack(side=tk.LEFT)
+            tk.Label(row_frame, text="|", fg="black", bg="grey",
+                    font=("TkDefaultFont", 12)).pack(side=tk.LEFT)  # Increased from 8 to 12
             
             # MIDI note in red
             midi_label = tk.Label(row_frame, text=str(midi_note),
-                                fg="red", bg="grey", font=("TkDefaultFont", 8))
+                                fg="red", bg="grey",
+                                font=("TkDefaultFont", 12))  # Increased from 8 to 12
             midi_label.pack(side=tk.LEFT)
             
             # Values section in white
             values_label = tk.Label(row_frame, text="|--|--",
-                                  fg="white", bg="grey", font=("TkDefaultFont", 8))
+                                  fg="white", bg="grey",
+                                  font=("TkDefaultFont", 12))  # Increased from 8 to 12
             values_label.pack(side=tk.LEFT)
             
             self.note_list_rows.append((note_label, midi_label, values_label))
@@ -435,6 +505,11 @@ class SynthesiaKeyboard(tk.Tk):
             # Update each part with appropriate styling
             note_label, midi_label, values_label = self.note_list_rows[index]
             values_label.config(text=f"|{velocity}|{return_time_text}")
+            
+            # Change text color to red if roundtrip time exceeds 100ms, otherwise white
+            if return_time is not None:
+                text_color = "black" if return_time > 75 else "white"
+                values_label.config(fg=text_color)
 
     def simulate_first_key(self):
         # Get delay from entry field
@@ -466,21 +541,20 @@ class SynthesiaKeyboard(tk.Tk):
         key_id = self.key_id_map[note]
         mock_event = type('Event', (), {'x': 0, 'y': 0})()
         
-        # Update status
-        note_name = NOTE_NAMES[note % 12]
-        octave = (note // 12) - 1
-        print(f"Testing key {self.current_test_index + 1}/{len(self.midi_notes)}: {note_name}{octave} (MIDI: {note})")
-        
-        # Press key
+        # Use existing key press logic
         self.on_key_click(mock_event, key_id)
         
-        # Schedule release using user-specified delay
-        self.after(self.delay_ms, lambda: self.release_and_continue(mock_event, key_id))
-        
-    def release_and_continue(self, event, key_id):
+        # Schedule release after delay
+        self.after(self.delay_ms, lambda: self.release_key_and_continue(mock_event, key_id))
+
+    def release_key_and_continue(self, event, key_id):
+        """Handle key release and schedule next key"""
+        # Use existing release logic
         self.on_key_release(event, key_id)
+        
+        # Wait for full delay before next key
         self.current_test_index += 1
-        self.after(self.delay_ms, self.test_next_key)  # Wait 100ms before next key
+        self.after(self.delay_ms, self.test_next_key)
 
     def on_key_press(self, event, key_id):
         """Modified to prevent duplicate presses"""
@@ -489,10 +563,19 @@ class SynthesiaKeyboard(tk.Tk):
             self.on_key_click(event, key_id)
 
     def on_mouse_enter(self, event, key_id):
+        note = self.active_keys.get(key_id)
+        self.update_hover_label(note)
         if self.mouse_pressed and key_id not in self.pressed_keys:
             self.on_key_click(event, key_id)
 
     def on_mouse_leave(self, event, key_id):
+        # Reset highlight when mouse leaves any key
+        for note_label, midi_label, values_label in self.note_list_rows:
+            note_label.config(bg="grey")
+            midi_label.config(bg="grey")
+            values_label.config(bg="grey")
+        
+        self.update_hover_label(None)
         if key_id in self.pressed_keys:
             self.on_key_release(event, key_id)
 
@@ -503,6 +586,52 @@ class SynthesiaKeyboard(tk.Tk):
             # Release all pressed keys
             for key_id in list(self.pressed_keys):  # Use list to avoid modifying set during iteration
                 self.on_key_release(event, key_id)
+
+    def clear_table(self):
+        """Clear all values in the note table"""
+        for _, _, values_label in self.note_list_rows:
+            values_label.config(text="|--|--", fg="white")  # Reset text and color
+        
+        # Reset status labels
+        self.key_status_label.config(text="Key Pressed: None")
+        self.midi_status_label.config(text="MIDI Input: None")
+        self.round_trip_label.config(text="Round Trip Time: N/A")
+
+    def update_velocity_label(self, event=None):
+        value = self.velocity_value.get()
+        self.velocity_percent.config(text=f"{value}%")
+
+    def get_velocity(self):
+        """Convert percentage to MIDI velocity (0-127)"""
+        return int((self.velocity_value.get() / 100) * 127)
+
+    def send_all_notes_off(self):
+        """Send note-off messages for all possible MIDI notes"""
+        if self.midi_output:
+            for note in range(21, 109):  # MIDI notes from A0 (21) to C8 (108)
+                self.midi_output.send(mido.Message('note_off', note=note, velocity=0))
+            print("All notes off sent")
+
+    def update_hover_label(self, note):
+        # Reset previous highlight if any
+        for _, _, values_label in self.note_list_rows:
+            values_label.config(bg="grey")  # Reset all backgrounds to default
+            
+        if note is None:
+            self.hover_label.config(text="Hover: None")
+        else:
+            note_name = NOTE_NAMES[note % 12]
+            octave = (note // 12) - 1
+            self.hover_label.config(text=f"Hover: {note_name}{octave} ({note})")
+            
+            # Highlight the corresponding table row
+            index = note - 21  # Convert MIDI note to table index
+            if 0 <= index < 88:
+                note_label, midi_label, values_label = self.note_list_rows[index]
+                # Highlight the entire row
+                note_label.config(bg="#404040")  # Darker grey for highlight
+                midi_label.config(bg="#404040")
+                values_label.config(bg="#404040")
 
 if __name__ == "__main__":
     app = SynthesiaKeyboard()
