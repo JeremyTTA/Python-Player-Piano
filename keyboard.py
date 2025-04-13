@@ -1,9 +1,10 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog  # Add filedialog import
 import mido
 import time
 import json  # Import json module
 import csv  # Import csv module
+import os  # Add os import for path handling
 
 NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
@@ -70,6 +71,12 @@ class SynthesiaKeyboard(tk.Tk):
                                bg="black", 
                                font=('TkDefaultFont', 14, 'bold'))
         self.hover_label.place(relx=0.5, rely=0.02, anchor='n')
+
+        self.midi_file = None
+        self.midi_messages = []  # Store parsed MIDI messages
+        self.is_playing = False
+        self.playback_index = 0
+        self.last_message_time = 0
 
     def create_indicator_rect(self):
         self.indicator_counter += 1  # Increment the counter
@@ -220,15 +227,28 @@ class SynthesiaKeyboard(tk.Tk):
                               bg="gray", fg="black", width=10, font=('TkDefaultFont', 9, 'bold'))
         self.test_button.grid(row=2, column=4, padx=5, pady=5)
 
-        # Add Clear button next to Test button
+        # Add Load MIDI button before Clear button
+        self.load_midi_button = tk.Button(control_frame, text="Load MIDI", 
+                                        command=self.load_midi_file,
+                                        bg="gray", fg="black", width=10, 
+                                        font=('TkDefaultFont', 9, 'bold'))
+        self.load_midi_button.grid(row=2, column=5, padx=5, pady=5)
+
+        # Adjust Clear button position
         self.clear_button = tk.Button(control_frame, text="Clear", command=self.clear_table,
                               bg="gray", fg="black", width=10, font=('TkDefaultFont', 9, 'bold'))
-        self.clear_button.grid(row=2, column=5, padx=5, pady=5)  # Place after Test button
+        self.clear_button.grid(row=2, column=6, padx=5, pady=5)  # Place after Test button
 
-        # Add Note Off button next to Clear button
+        # Adjust Note Off button position
         self.note_off_button = tk.Button(control_frame, text="Note Off", command=self.send_all_notes_off,
                               bg="gray", fg="black", width=10, font=('TkDefaultFont', 9, 'bold'))
-        self.note_off_button.grid(row=2, column=6, padx=5, pady=5)  # Place after Clear button
+        self.note_off_button.grid(row=2, column=7, padx=5, pady=5)  # Place after Clear button
+
+        # Add MIDI file status label
+        self.midi_file_label = tk.Label(control_frame, text="No MIDI file loaded",
+                                      fg="white", bg="black",
+                                      font=('TkDefaultFont', 9))
+        self.midi_file_label.grid(row=4, column=0, columnspan=8, padx=5, pady=5)
 
         # Add velocity slider after the delay controls
         velocity_frame = tk.Frame(control_frame, bg="black")
@@ -255,6 +275,24 @@ class SynthesiaKeyboard(tk.Tk):
         # Bind slider to update percentage label
         self.velocity_slider.bind('<Motion>', self.update_velocity_label)
         self.velocity_slider.bind('<ButtonRelease-1>', self.update_velocity_label)
+
+        # Add playback controls frame
+        playback_frame = tk.Frame(control_frame, bg="black")
+        playback_frame.grid(row=5, column=0, columnspan=8, padx=5, pady=5)
+        
+        self.play_button = tk.Button(playback_frame, text="Play", 
+                                   command=self.toggle_playback,
+                                   bg="gray", fg="black", width=10,
+                                   font=('TkDefaultFont', 9, 'bold'),
+                                   state='disabled')
+        self.play_button.pack(side=tk.LEFT, padx=5)
+        
+        self.stop_button = tk.Button(playback_frame, text="Stop", 
+                                   command=self.stop_playback,
+                                   bg="gray", fg="black", width=10,
+                                   font=('TkDefaultFont', 9, 'bold'),
+                                   state='disabled')
+        self.stop_button.pack(side=tk.LEFT, padx=5)
 
     def validate_delay(self, value):
         if value == "": return True
@@ -632,6 +670,122 @@ class SynthesiaKeyboard(tk.Tk):
                 note_label.config(bg="#404040")  # Darker grey for highlight
                 midi_label.config(bg="#404040")
                 values_label.config(bg="#404040")
+
+    def load_midi_file(self):
+        """Open file dialog and load a MIDI file"""
+        filepath = filedialog.askopenfilename(
+            title="Select MIDI File",
+            filetypes=[("MIDI files", "*.mid"), ("All files", "*.*")]
+        )
+        
+        if filepath:
+            try:
+                # Load file in chunks
+                self.midi_file_label.config(text="Loading MIDI file...")
+                self.after(10, lambda: self.load_midi_in_chunks(filepath))
+            except Exception as e:
+                self.midi_file = None
+                self.midi_file_label.config(text=f"Error loading file: {str(e)}")
+                self.play_button.config(state='disabled')
+                self.stop_button.config(state='disabled')
+
+    def load_midi_in_chunks(self, filepath):
+        """Load MIDI file in chunks to prevent UI freezing"""
+        try:
+            self.midi_file = mido.MidiFile(filepath)
+            filename = os.path.basename(filepath)
+            self.midi_messages = []
+            self.parse_midi_chunk(filename, 0, 0)
+        except Exception as e:
+            self.midi_file_label.config(text=f"Error: {str(e)}")
+            self.play_button.config(state='disabled')
+            self.stop_button.config(state='disabled')
+
+    def parse_midi_chunk(self, filename, track_idx, msg_count):
+        """Parse MIDI file in small chunks"""
+        if not hasattr(self, 'temp_time'):
+            self.temp_time = 0
+            self.track_iterators = [iter(track) for track in self.midi_file.tracks]
+
+        try:
+            if track_idx < len(self.midi_file.tracks):
+                # Process a small chunk of messages
+                chunk_size = 100
+                messages_processed = 0
+                
+                while messages_processed < chunk_size and track_idx < len(self.track_iterators):
+                    try:
+                        msg = next(self.track_iterators[track_idx])
+                        self.temp_time += msg.time
+                        if msg.type in ['note_on', 'note_off']:
+                            self.midi_messages.append((self.temp_time, msg))
+                            msg_count += 1
+                        messages_processed += 1
+                    except StopIteration:
+                        track_idx += 1
+
+                # Update progress
+                progress = f"Loading: {filename}\nProcessed {msg_count} messages..."
+                self.midi_file_label.config(text=progress)
+                
+                # Schedule next chunk
+                self.after(1, lambda: self.parse_midi_chunk(filename, track_idx, msg_count))
+            else:
+                # Finished loading
+                self.midi_messages.sort(key=lambda x: x[0])  # Sort by time
+                duration = self.temp_time
+                del self.temp_time
+                del self.track_iterators
+                
+                self.midi_file_label.config(
+                    text=f"Loaded: {filename}\n"
+                         f"Messages: {msg_count}\n"
+                         f"Duration: {duration:.1f}s"
+                )
+                self.play_button.config(state='normal')
+                self.stop_button.config(state='normal')
+
+        except Exception as e:
+            self.midi_file_label.config(text=f"Error parsing file: {str(e)}")
+            self.play_button.config(state='disabled')
+            self.stop_button.config(state='disabled')
+
+    def toggle_playback(self):
+        """Toggle MIDI file playback"""
+        if not self.is_playing:
+            self.is_playing = True
+            self.play_button.config(text="Pause")
+            self.last_message_time = time.time()
+            self.play_next_message()
+        else:
+            self.is_playing = False
+            self.play_button.config(text="Play")
+
+    def stop_playback(self):
+        """Stop MIDI file playback"""
+        self.is_playing = False
+        self.playback_index = 0
+        self.play_button.config(text="Play")
+        self.send_all_notes_off()
+
+    def play_next_message(self):
+        """Play next MIDI message in sequence"""
+        if not self.is_playing or self.playback_index >= len(self.midi_messages):
+            if self.playback_index >= len(self.midi_messages):
+                self.stop_playback()
+            return
+        
+        current_time = time.time() - self.last_message_time
+        msg_time, msg = self.midi_messages[self.playback_index]
+        
+        if current_time >= msg_time:
+            if self.midi_output:
+                self.midi_output.send(msg)
+            self.playback_index += 1
+            self.after(1, self.play_next_message)
+        else:
+            # Schedule next check
+            self.after(1, self.play_next_message)
 
 if __name__ == "__main__":
     app = SynthesiaKeyboard()
