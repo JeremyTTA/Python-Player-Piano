@@ -12,7 +12,24 @@ class SynthesiaKeyboard(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Standlee Player Piano")
-        self.geometry("800x400")  # Initial window size
+        
+        # Initialize MIDI variables first
+        self.midi_input = None
+        self.midi_output = None
+        
+        # Default size if no saved state
+        self.geometry("800x400")
+        self.state('normal')  # Ensure window starts in normal state
+        
+        # Create tabs first so they're at the bottom of the z-order
+        self.create_tabs()
+        
+        # Create MIDI visualization
+        self.create_midi_visualization()
+        
+        # Load window size and state before creating other elements
+        self.load_window_size()
+
         self.bind("<Configure>", self.on_resize)
 
         self.canvas = tk.Canvas(self, bg="black")
@@ -22,24 +39,27 @@ class SynthesiaKeyboard(tk.Tk):
         self.update_idletasks()
         
         # Initialize table positions
-        self.update_table_position()  # Remove table_height initialization
+        self.update_table_position()
 
         self.active_keys = {}
-        self.key_colors = {}  # New dictionary to store original colors
-        self.pressed_keys = set()  # Add this to track currently pressed keys
+        self.key_colors = {}
+        self.pressed_keys = set()
 
-        self.load_window_size()  # Load saved window size
+        self.delay_ms = 50
 
-        self.delay_ms = 50  # Initialize delay before creating controls
-
-        self.mouse_pressed = False  # Add this line before draw_keyboard()
-        self.bind("<ButtonRelease-1>", self.on_global_mouse_release)  # Add global mouse release handler
+        self.mouse_pressed = False
+        self.bind("<ButtonRelease-1>", self.on_global_mouse_release)
         self.draw_keyboard()
         self.midi_output = None
         self.midi_input = None
-        self.create_note_table()  # Create table first
+
+        # Create remaining UI elements
+        self.create_note_table()
         self.create_midi_controls()
         self.create_status_labels()
+
+        # Initialize button visibility based on current tab
+        self.update_button_visibility()
 
         self.load_midi_ports()  # Load saved MIDI ports
 
@@ -78,36 +98,116 @@ class SynthesiaKeyboard(tk.Tk):
         self.playback_index = 0
         self.last_message_time = 0
 
+        # Start MIDI callback after initialization
+        self.start_midi_callback()
+        
+        # Refresh MIDI ports periodically
+        self.after(5000, self.periodic_port_refresh)
+
+    def create_tabs(self):
+        """Create tabbed interface"""
+        self.tab_control = ttk.Notebook(self)
+        
+        # Create MIDI File tab
+        self.midi_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.midi_tab, text='MIDI File')
+        
+        # Create Calibrate tab
+        self.calibrate_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.calibrate_tab, text='Calibrate')
+        
+        # Position tabs - lift above canvas but below controls
+        keyboard_height = self.winfo_height() // 4
+        control_height = 150
+        self.tab_control.place(x=0, y=control_height, 
+                             relwidth=1.0, 
+                             height=self.winfo_height() - keyboard_height - control_height - 4)
+        
+        # Bind tab change to save settings and update button visibility
+        self.tab_control.bind('<<NotebookTabChanged>>', self.on_tab_changed)
+
+    def on_tab_changed(self, event):
+        """Handle tab change events"""
+        self.save_window_size()
+        self.update_button_visibility()
+
+    def update_button_visibility(self):
+        """Update visibility of Test and Clear buttons based on current tab"""
+        if not hasattr(self, 'test_button') or not hasattr(self, 'clear_button'):
+            return
+            
+        current_tab = self.tab_control.select()
+        is_calibrate_tab = current_tab == self.tab_control.tabs()[1]  # Check if Calibrate tab is selected
+        
+        if is_calibrate_tab:
+            self.test_button.grid()  # Show buttons
+            self.clear_button.grid()
+        else:
+            self.test_button.grid_remove()  # Hide buttons but preserve their space
+            self.clear_button.grid_remove()
+
     def create_indicator_rect(self):
-        self.indicator_counter += 1  # Increment the counter
+        self.indicator_counter += 1
         width = self.winfo_width()
         height = self.winfo_height()
         rect_size = 40  # Size of the rectangle
         x0 = (width - rect_size) // 2
         y0 = (height - rect_size) // 2
         x1 = x0 + rect_size
-        y1 = y0 + rect_size
+        y1 = y0 + rect_size  # Fixed: Add y1 calculation
+        
         if self.indicator_rect:
             self.canvas.coords(self.indicator_rect, x0, y0, x1, y1)
-            self.canvas.itemconfig(self.indicator_rect, fill=self.indicator_color)  # Maintain the current color
+            self.canvas.itemconfig(self.indicator_rect, fill=self.indicator_color)
         else:
             self.indicator_rect = self.canvas.create_rectangle(x0, y0, x1, y1, fill=self.indicator_color, outline="white")
-        if self.indicator_text:
-            self.canvas.coords(self.indicator_text, (x0 + x1) // 2, (y0 + y1) // 2)
-        else:
-            self.indicator_text = self.canvas.create_text((x0 + x1) // 2, (y0 + y1) // 2, text=str(self.indicator_counter), fill="white")
 
     def on_resize(self, event):
-        self.save_window_size()  # Save window size on resize
+        """Handle window resize with better state preservation"""
+        if not self.winfo_viewable():  # Skip first resize event
+            return
+            
+        # Store current visualization state if it exists
+        had_visualization = hasattr(self, 'midi_messages') and self.midi_messages
+        current_scroll = None
+        if had_visualization:
+            current_scroll = self.viz_canvas.yview()
+            
+        # Update window state
+        self.save_window_size()
+        
+        # Redraw keyboard
         self.canvas.delete("all")
         self.draw_keyboard()
-        self.create_indicator_rect()  # Recreate the indicator rectangle after drawing the keyboard
+        self.create_indicator_rect()
+        
+        # Update other elements
         self.update_table_position()
+        if hasattr(self, 'tab_control'):
+            keyboard_height = self.winfo_height() // 4
+            control_height = 150
+            self.tab_control.place(x=0, y=control_height,
+                                 relwidth=1.0,
+                                 height=self.winfo_height() - keyboard_height - control_height - 4)
+            self.tab_control.lift()
+        
+        # Restore visualization if it existed
+        if had_visualization:
+            self.after(100, lambda: self.restore_visualization(current_scroll))
+
+    def restore_visualization(self, scroll_position=None):
+        """Restore visualization with proper scroll position"""
+        self.visualize_midi_file()
+        if scroll_position:
+            self.viz_canvas.yview_moveto(scroll_position[0])
 
     def save_window_size(self):
         size = {
             "width": self.winfo_width(),
-            "height": self.winfo_height()
+            "height": self.winfo_height(),
+            "last_tab": self.tab_control.select(),
+            "state": self.state(),  # Save current window state
+            "zoomed": self.wm_state() == 'zoomed'  # Explicitly track zoomed state
         }
         with open("window_size.json", "w") as f:
             json.dump(size, f)
@@ -116,9 +216,24 @@ class SynthesiaKeyboard(tk.Tk):
         try:
             with open("window_size.json", "r") as f:
                 size = json.load(f)
+                
+                # Set initial geometry
                 self.geometry(f'{size["width"]}x{size["height"]}')
+                
+                # Restore window state
+                if size.get("zoomed", False):
+                    self.state('zoomed')
+                elif "state" in size:
+                    self.state(size["state"])
+                
+                # Update tab selection
+                if "last_tab" in size:
+                    self.after(100, lambda: self.tab_control.select(size["last_tab"]))
+                    
         except FileNotFoundError:
-            pass
+            # Use default size if no saved state
+            self.geometry("800x400")
+            self.state('normal')
 
     def draw_keyboard(self):
         width = self.winfo_width()
@@ -307,17 +422,28 @@ class SynthesiaKeyboard(tk.Tk):
             "input": self.midi_input_var.get(),
             "output": self.midi_output_var.get()
         }
-        with open("midi_ports.json", "w") as f:
-            json.dump(ports, f)
+        try:
+            with open("midi_ports.json", "w") as f:
+                json.dump(ports, f)
+                print(f"Saved MIDI port settings: {ports}")
+        except Exception as e:
+            print(f"Error saving MIDI ports: {str(e)}")
 
     def load_midi_ports(self):
         try:
             with open("midi_ports.json", "r") as f:
                 ports = json.load(f)
-                self.midi_input_var.set(ports.get("input", ""))
-                self.midi_output_var.set(ports.get("output", ""))
+                print(f"Loading saved MIDI ports: {ports}")
+                if "input" in ports:
+                    self.midi_input_var.set(ports["input"])
+                    print(f"Set input to: {ports['input']}")
+                if "output" in ports:
+                    self.midi_output_var.set(ports["output"])
+                    print(f"Set output to: {ports['output']}")
         except FileNotFoundError:
-            pass
+            print("No saved MIDI port settings found")
+        except Exception as e:
+            print(f"Error loading MIDI ports: {str(e)}")
 
     def create_status_labels(self):
         status_frame = tk.Frame(self, height=100, bg="black")
@@ -354,53 +480,86 @@ class SynthesiaKeyboard(tk.Tk):
                                         font=label_font)
         self.round_trip_label.grid(row=2, column=0, padx=5, pady=5)
 
-    def check_midi_status(self): 
-        input_name = self.midi_input_var.get()
-        output_name = self.midi_output_var.get()        
+    def check_midi_status(self):
+        """Update the display of MIDI connection status"""
+        input_status = self.midi_input.name if self.midi_input else "Not Connected"
+        output_status = self.midi_output.name if self.midi_output else "Not Connected"
         
-        # Simplified connection checks
-        input_connected = (input_name != "None" and input_name in mido.get_input_names() 
-                         and self.midi_input is not None)
-        output_connected = (output_name != "None" and output_name in mido.get_output_names() 
-                          and self.midi_output is not None)
-
-        self.midi_input_status.itemconfig(1, fill="green" if input_connected else "red")
-        self.midi_output_status.itemconfig(1, fill="green" if output_connected else "red")
-
-        self.after(1000, self.check_midi_status)
-
-    def update_midi_ports(self, *args):
-        print("\n=== MIDI Port Update ===")
-        print(f"Available inputs: {mido.get_input_names()}")
-        print(f"Available outputs: {mido.get_output_names()}")
+        print(f"Input Status: {input_status}")
+        print(f"Output Status: {output_status}")
         
-        if self.midi_input:
-            print(f"Closing existing input: {self.midi_input}")
-            self.midi_input.close()
-            self.midi_input = None
-        if self.midi_output:
-            print(f"Closing existing output: {self.midi_output}")
-            self.midi_output.close()
-            self.midi_output = None
+        # Update status labels if they exist
+        if hasattr(self, 'input_status_label'):
+            self.input_status_label.config(text=f"Input: {input_status}")
+        if hasattr(self, 'output_status_label'):
+            self.output_status_label.config(text=f"Output: {output_status}")
 
-        input_name = self.midi_input_var.get()
-        output_name = self.midi_output_var.get()
-        
-        print(f"Attempting to connect to input: {input_name}")
-        print(f"Attempting to connect to output: {output_name}")
-
+    def update_midi_ports(self, event=None):
+        """Update MIDI port connections based on dropdown selections"""
         try:
-            if input_name != "None" and input_name in mido.get_input_names():
-                self.midi_input = mido.open_input(input_name, callback=self.on_midi_input)
-                print(f"Successfully connected to input: {input_name}")
-            if output_name != "None" and output_name in mido.get_output_names():
-                self.midi_output = mido.open_output(output_name)
-                print(f"Successfully connected to output: {output_name}")
+            # Get selected ports from dropdowns
+            input_port = self.midi_input_var.get()
+            output_port = self.midi_output_var.get()
+            
+            # Handle input port
+            if hasattr(self, 'midi_input') and self.midi_input:
+                self.midi_input.close()
+                self.midi_input = None
+            
+            if input_port and input_port != "None":
+                try:
+                    self.midi_input = mido.open_input(input_port)
+                    self.midi_input_status.create_oval(0, 0, 20, 20, fill="green")
+                except Exception as e:
+                    print(f"Error connecting to input port: {e}")
+                    self.midi_input_status.create_oval(0, 0, 20, 20, fill="red")
+            else:
+                self.midi_input_status.create_oval(0, 0, 20, 20, fill="red")
+            
+            # Handle output port
+            if hasattr(self, 'midi_output') and self.midi_output:
+                self.midi_output.close()
+                self.midi_output = None
+                
+            if output_port and output_port != "None":
+                try:
+                    self.midi_output = mido.open_output(output_port)
+                    self.midi_output_status.create_oval(0, 0, 20, 20, fill="green")
+                except Exception as e:
+                    print(f"Error connecting to output port: {e}")
+                    self.midi_output_status.create_oval(0, 0, 20, 20, fill="red")
+            else:
+                self.midi_output_status.create_oval(0, 0, 20, 20, fill="red")
+            
+            # Save port settings
+            self.save_midi_ports()
+            
+            # Update status display
+            self.check_midi_status()
+            
         except Exception as e:
-            print(f"Error connecting to MIDI ports: {str(e)}")
+            print(f"Error updating MIDI ports: {e}")
+            self.midi_input_status.create_oval(0, 0, 20, 20, fill="red")
+            self.midi_output_status.create_oval(0, 0, 20, 20, fill="red")
 
-        self.save_midi_ports()
-        self.check_midi_status()
+    def connect_midi_input(self, port_name):
+        """Connect to the selected MIDI input port"""
+        try:
+            # Close existing connection if any
+            if self.midi_input:
+                self.midi_input.close()
+            
+            # Open new connection
+            self.midi_input = mido.open_input(port_name)
+            self.input_var.set(port_name)  # Update dropdown display
+            print(f"Connected to MIDI input: {port_name}")
+            
+            # Update status display
+            self.check_midi_status()
+        except Exception as e:
+            print(f"Error connecting to MIDI input: {e}")
+            self.input_var.set("Connection Failed")
+            self.midi_input = None
 
     def on_key_click(self, event, key_id):
         self.canvas.itemconfig(key_id, fill="blue")
@@ -466,88 +625,79 @@ class SynthesiaKeyboard(tk.Tk):
         self.update_idletasks()
 
     def create_note_table(self):
-        self.table_frame = tk.Frame(self, bg="grey", relief="raised", borderwidth=1)
-        self.update_table_position()
-
-        # Increase columns and adjust rows per column
-        num_columns = 8  # Increased from 6 to 8
-        rows_per_column = 11  # Adjusted from 15 to 11 to fit all 88 keys
-
-        # Configure grid columns to be equal with increased width
+        """Create note table inside a fixed tab with optimized drawing"""
+        num_columns = 9
+        
+        # Create main frame
+        self.table_frame = tk.Frame(self.calibrate_tab, bg="grey", relief="raised", borderwidth=1)
+        self.table_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        
+        # Configure grid columns to be equal width
         for i in range(num_columns):
-            self.table_frame.grid_columnconfigure(i, weight=1, minsize=150)  # Increased from 130 to 150
-
-        # Header labels with larger font
+            self.table_frame.grid_columnconfigure(i, weight=1)
+            
+        # Cache fonts for reuse
+        header_font = ("TkDefaultFont", 12, 'bold')
+        row_font = ("TkDefaultFont", 12)
+        
+        # Header labels - single row with all headers
         header_text = "Note|MIDI|V|RT"
         for col in range(num_columns):
             header = tk.Label(self.table_frame, text=header_text,
-                             fg="black", bg="grey", anchor='w',
-                             font=("TkDefaultFont", 12, 'bold'))  # Increased from 8 to 12
-            header.grid(row=0, column=col, sticky='w', padx=3, pady=2)  # Slightly increased padding
+                            fg="black", bg="grey", anchor='w',
+                            font=header_font)
+            header.grid(row=0, column=col, sticky='w', padx=3, pady=2)
 
-        # Create note rows with larger font
+        # Calculate rows per column
+        total_keys = 88
+        rows_per_column = (total_keys + num_columns - 1) // num_columns
+
+        # Create note rows more efficiently
         self.note_list_rows = []
         for i in range(88):
             midi_note = i + 21
             note_name = NOTE_NAMES[midi_note % 12]
             octave = (midi_note // 12) - 1
             
-            row_frame = tk.Frame(self.table_frame, bg="black")
-            row_frame.grid(row=i % rows_per_column + 1, column=i // rows_per_column, 
-                          sticky='w', padx=3, pady=1)
+            col = i // rows_per_column
+            row = i % rows_per_column + 1
             
-            # Note name in bold blue
-            note_label = tk.Label(row_frame, text=f"{note_name}{octave}", 
-                                fg="blue", bg="grey", 
-                                font=("TkDefaultFont", 12, "bold"))  # Increased from 8 to 12
-            note_label.pack(side=tk.LEFT)
+            # Create a single label for the entire row with formatted text
+            row_text = f"{note_name}{octave}|{midi_note}|--|--"
+            row_label = tk.Label(self.table_frame, 
+                               text=row_text,
+                               fg="white", 
+                               bg="grey",
+                               font=row_font,
+                               anchor='w',
+                               padx=3)
+            row_label.grid(row=row, column=col, sticky='w', pady=1)
             
-            # Separator
-            tk.Label(row_frame, text="|", fg="black", bg="grey",
-                    font=("TkDefaultFont", 12)).pack(side=tk.LEFT)  # Increased from 8 to 12
-            
-            # MIDI note in red
-            midi_label = tk.Label(row_frame, text=str(midi_note),
-                                fg="red", bg="grey",
-                                font=("TkDefaultFont", 12))  # Increased from 8 to 12
-            midi_label.pack(side=tk.LEFT)
-            
-            # Values section in white
-            values_label = tk.Label(row_frame, text="|--|--",
-                                  fg="white", bg="grey",
-                                  font=("TkDefaultFont", 12))  # Increased from 8 to 12
-            values_label.pack(side=tk.LEFT)
-            
-            self.note_list_rows.append((note_label, midi_label, values_label))
+            # Store reference with note data
+            self.note_list_rows.append({
+                'label': row_label,
+                'note': midi_note,
+                'note_name': f"{note_name}{octave}"
+            })
 
     def update_table_position(self):
-        """Recalculate and update table position"""
+        """Table now goes inside Calibrate tab"""
         if hasattr(self, 'table_frame'):
-            keyboard_height = self.winfo_height() // 4
-            control_height = 150  # Approximate height of control frame
-            
-            # Calculate position and height
-            y_pos = control_height
-            table_height = self.winfo_height() - keyboard_height - control_height - 4
-            
-            self.table_frame.place(x=0, y=y_pos, relwidth=1.0, height=table_height)
+            self.table_frame.place(relx=0, rely=0, relwidth=1.0, relheight=1.0)
 
     def update_note_table(self, note, velocity, return_time=None):
-        # Calculate the index for the note (A0 = MIDI 21, so index = note - 21)
+        """Update table row more efficiently"""
         index = note - 21
         if 0 <= index < 88:
-            note_name = NOTE_NAMES[note % 12]
-            octave = (note // 12) - 1
-            return_time_text = f"{return_time:.1f}" if return_time is not None else "N/A"  # Shortened decimal
+            row_data = self.note_list_rows[index]
+            return_time_text = f"{return_time:.1f}" if return_time is not None else "--"
             
-            # Update each part with appropriate styling
-            note_label, midi_label, values_label = self.note_list_rows[index]
-            values_label.config(text=f"|{velocity}|{return_time_text}")
-            
-            # Change text color to red if roundtrip time exceeds 100ms, otherwise white
-            if return_time is not None:
-                text_color = "black" if return_time > 75 else "white"
-                values_label.config(fg=text_color)
+            # Update text in single operation
+            row_text = f"{row_data['note_name']}|{note}|{velocity}|{return_time_text}"
+            row_data['label'].config(
+                text=row_text,
+                fg="black" if return_time and return_time > 75 else "white"
+            )
 
     def simulate_first_key(self):
         # Get delay from entry field
@@ -651,25 +801,28 @@ class SynthesiaKeyboard(tk.Tk):
             print("All notes off sent")
 
     def update_hover_label(self, note):
-        # Reset previous highlight if any
-        for _, _, values_label in self.note_list_rows:
-            values_label.config(bg="grey")  # Reset all backgrounds to default
-            
+        """More efficient hover highlighting"""
         if note is None:
             self.hover_label.config(text="Hover: None")
+            # Reset last highlighted row if exists
+            if hasattr(self, '_last_highlight') and self._last_highlight is not None:
+                self.note_list_rows[self._last_highlight]['label'].config(bg="grey")
+                self._last_highlight = None
         else:
             note_name = NOTE_NAMES[note % 12]
             octave = (note // 12) - 1
             self.hover_label.config(text=f"Hover: {note_name}{octave} ({note})")
             
-            # Highlight the corresponding table row
-            index = note - 21  # Convert MIDI note to table index
+            # Update highlight
+            index = note - 21
             if 0 <= index < 88:
-                note_label, midi_label, values_label = self.note_list_rows[index]
-                # Highlight the entire row
-                note_label.config(bg="#404040")  # Darker grey for highlight
-                midi_label.config(bg="#404040")
-                values_label.config(bg="#404040")
+                # Reset previous highlight if exists
+                if hasattr(self, '_last_highlight') and self._last_highlight is not None:
+                    self.note_list_rows[self._last_highlight]['label'].config(bg="grey")
+                
+                # Set new highlight
+                self.note_list_rows[index]['label'].config(bg="#404040")
+                self._last_highlight = index
 
     def load_midi_file(self):
         """Open file dialog and load a MIDI file"""
@@ -680,112 +833,559 @@ class SynthesiaKeyboard(tk.Tk):
         
         if filepath:
             try:
-                # Load file in chunks
+                # Clear previous visualization first
+                self.clear_visualization()
+                self.midi_messages = []
+                
+                # Update UI to show loading state
                 self.midi_file_label.config(text="Loading MIDI file...")
-                self.after(10, lambda: self.load_midi_in_chunks(filepath))
+                self.play_button.config(state='disabled')
+                self.stop_button.config(state='disabled')
+                
+                # Initialize loading state
+                self.midi_file = mido.MidiFile(filepath)
+                self.loading_cancelled = False
+                
+                # Start asynchronous loading process
+                self.after(10, lambda: self.process_midi_messages(filepath))
+                
             except Exception as e:
                 self.midi_file = None
                 self.midi_file_label.config(text=f"Error loading file: {str(e)}")
                 self.play_button.config(state='disabled')
                 self.stop_button.config(state='disabled')
 
-    def load_midi_in_chunks(self, filepath):
-        """Load MIDI file in chunks to prevent UI freezing"""
+    def process_midi_messages(self, filepath, chunk_start=0):
+        """Process MIDI messages in chunks to avoid hanging"""
         try:
-            self.midi_file = mido.MidiFile(filepath)
-            filename = os.path.basename(filepath)
-            self.midi_messages = []
-            self.parse_midi_chunk(filename, 0, 0)
+            chunk_size = 1000  # Number of messages to process per chunk
+            messages_processed = 0
+            current_time = 0
+            
+            # Process a chunk of messages from each track
+            for track_idx, track in enumerate(self.midi_file.tracks[chunk_start:]):
+                track_time = 0
+                
+                for msg in track:
+                    track_time += msg.time
+                    if msg.type in ['note_on', 'note_off']:
+                        self.midi_messages.append((track_time, msg))
+                    
+                    messages_processed += 1
+                    if messages_processed >= chunk_size:
+                        # Schedule next chunk and update progress
+                        next_chunk = chunk_start + track_idx + 1
+                        progress = f"Loading: {os.path.basename(filepath)}\nProcessed {len(self.midi_messages)} messages..."
+                        self.midi_file_label.config(text=progress)
+                        self.update_idletasks()
+                        
+                        self.after(1, lambda: self.process_midi_messages(filepath, next_chunk))
+                        return
+            
+            # All messages processed, finish up
+            self.finish_midi_loading(filepath)
+            
         except Exception as e:
-            self.midi_file_label.config(text=f"Error: {str(e)}")
+            self.midi_file_label.config(text=f"Error processing file: {str(e)}")
             self.play_button.config(state='disabled')
             self.stop_button.config(state='disabled')
 
-    def parse_midi_chunk(self, filename, track_idx, msg_count):
-        """Parse MIDI file in small chunks"""
-        if not hasattr(self, 'temp_time'):
-            self.temp_time = 0
-            self.track_iterators = [iter(track) for track in self.midi_file.tracks]
-
+    def finish_midi_loading(self, filepath):
+        """Complete MIDI file loading and create visualization"""
         try:
-            if track_idx < len(self.midi_file.tracks):
-                # Process a small chunk of messages
-                chunk_size = 100
-                messages_processed = 0
-                
-                while messages_processed < chunk_size and track_idx < len(self.track_iterators):
-                    try:
-                        msg = next(self.track_iterators[track_idx])
-                        self.temp_time += msg.time
-                        if msg.type in ['note_on', 'note_off']:
-                            self.midi_messages.append((self.temp_time, msg))
-                            msg_count += 1
-                        messages_processed += 1
-                    except StopIteration:
-                        track_idx += 1
-
-                # Update progress
-                progress = f"Loading: {filename}\nProcessed {msg_count} messages..."
-                self.midi_file_label.config(text=progress)
-                
-                # Schedule next chunk
-                self.after(1, lambda: self.parse_midi_chunk(filename, track_idx, msg_count))
+            # Sort messages by time
+            self.midi_messages.sort(key=lambda x: x[0])
+            
+            # Calculate total duration
+            if self.midi_messages:
+                duration = self.midi_messages[-1][0]
             else:
-                # Finished loading
-                self.midi_messages.sort(key=lambda x: x[0])  # Sort by time
-                duration = self.temp_time
-                del self.temp_time
-                del self.track_iterators
-                
-                self.midi_file_label.config(
-                    text=f"Loaded: {filename}\n"
-                         f"Messages: {msg_count}\n"
-                         f"Duration: {duration:.1f}s"
-                )
-                self.play_button.config(state='normal')
-                self.stop_button.config(state='normal')
-
+                duration = 0
+            
+            # Update UI
+            self.midi_file_label.config(
+                text=f"Loaded: {os.path.basename(filepath)}\n"
+                     f"Messages: {len(self.midi_messages)}\n"
+                     f"Duration: {duration:.1f}s"
+            )
+            
+            # Enable playback controls
+            self.play_button.config(state='normal')
+            self.stop_button.config(state='normal')
+            
+            # Start visualization process
+            self.create_visualization_in_chunks()
+            
         except Exception as e:
-            self.midi_file_label.config(text=f"Error parsing file: {str(e)}")
+            self.midi_file_label.config(text=f"Error finalizing file: {str(e)}")
             self.play_button.config(state='disabled')
             self.stop_button.config(state='disabled')
+
+    def create_visualization_in_chunks(self, start_idx=0):
+        """Create visualization incrementally to avoid hanging"""
+        if not self.midi_messages:
+            return
+            
+        try:
+            # Switch to MIDI File tab and ensure canvas is ready
+            self.tab_control.select(0)
+            
+            # First time setup
+            if start_idx == 0:
+                self.clear_visualization()
+                max_time = self.midi_messages[-1][0]
+                self.max_height = max_time * self.pixels_per_second + 50
+                self.draw_measure_lines()
+                self.update_idletasks()
+            
+            # Process a chunk of messages
+            chunk_size = 100
+            end_idx = min(start_idx + chunk_size, len(self.midi_messages))
+            
+            # Create note rectangles for this chunk
+            active_notes = {}
+            for time, msg in self.midi_messages[start_idx:end_idx]:
+                if msg.type == 'note_on' and msg.velocity > 0:
+                    active_notes[msg.note] = (time, msg.velocity)
+                elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
+                    if msg.note in active_notes:
+                        start_time, velocity = active_notes[msg.note]
+                        duration = time - start_time
+                        if duration > 0:
+                            self.add_note_visualization(msg.note, start_time, duration, velocity)
+                        del active_notes[msg.note]
+            
+            # Update progress
+            progress = f"{int((end_idx / len(self.midi_messages)) * 100)}% visualized..."
+            self.midi_file_label.config(text=self.midi_file_label.cget("text") + f"\n{progress}")
+            
+            # Schedule next chunk if needed
+            if end_idx < len(self.midi_messages):
+                self.after(1, lambda: self.create_visualization_in_chunks(end_idx))
+            else:
+                # Finish up
+                self.viz_canvas.configure(scrollregion=(0, 0, self.viz_canvas.winfo_width(), self.max_height))
+                self.viz_canvas.yview_moveto(0.0)
+                self.update_idletasks()
+                
+                # Remove progress message
+                current_text = self.midi_file_label.cget("text")
+                self.midi_file_label.config(text=current_text.split('\n', 3)[0:3])
+                
+        except Exception as e:
+            self.midi_file_label.config(text=f"Error creating visualization: {str(e)}")
+
+    def visualize_midi_file(self):
+        """Start the chunked visualization process"""
+        if not self.midi_messages:
+            return
+        self.create_visualization_in_chunks()
+
+    def create_midi_visualization(self):
+        """Create visualization area in MIDI File tab"""
+        # Create container frame that fills the tab
+        self.viz_container = tk.Frame(self.midi_tab)
+        self.viz_container.pack(fill=tk.BOTH, expand=True)
+        
+        # Create canvas with scrollbar
+        self.viz_canvas = tk.Canvas(self.viz_container, bg="black", width=800, height=600)
+        self.viz_scrollbar = ttk.Scrollbar(self.viz_container, orient="vertical", command=self.viz_canvas.yview)
+        
+        # Configure canvas
+        self.viz_canvas.configure(yscrollcommand=self.viz_scrollbar.set)
+        
+        # Pack scrollbar and canvas
+        self.viz_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.viz_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Force initial canvas update
+        self.viz_container.update_idletasks()
+        self.update_idletasks()
+        
+        # Set visualization parameters
+        self.note_width = 15  # Fixed width for all note rectangles
+        self.pixels_per_second = 50  # Vertical scale for duration
+        self.max_height = 0  # Track maximum height for scroll region
+        
+        # Create tooltip
+        self.tooltip = tk.Label(self, 
+                              bg='black', 
+                              fg='white',
+                              font=('TkDefaultFont', 10),
+                              relief='solid',
+                              borderwidth=1)
+        
+        # Bind events
+        self.viz_canvas.bind('<Motion>', self.update_tooltip)
+        self.viz_canvas.bind('<Leave>', self.hide_tooltip)
+        self.viz_canvas.bind('<MouseWheel>', lambda e: self.viz_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        self.viz_canvas.bind('<Configure>', self.on_viz_canvas_resize)
+
+    def update_tooltip(self, event):
+        """Update tooltip position and text based on mouse position"""
+        # Convert mouse coordinates to canvas coordinates
+        canvas_x = self.viz_canvas.canvasx(event.x)
+        canvas_y = self.viz_canvas.canvasy(event.y)
+        
+        # Find items under cursor using coordinates
+        items = self.viz_canvas.find_overlapping(canvas_x, canvas_y, canvas_x, canvas_y)
+        
+        if not items:
+            self.hide_tooltip(None)
+            return
+            
+        # Get the first item's tags
+        tags = self.viz_canvas.gettags(items[0])
+        
+        # Check if it's a note rectangle
+        for tag in tags:
+            if tag.startswith('note:'):
+                # Parse note info from tag
+                _, note_name, velocity, duration = tag.split(':')
+                
+                # Create tooltip text
+                tooltip_text = f"Note: {note_name}\nVelocity: {velocity}\nDuration: {float(duration):.1f}ms"
+                
+                # Update tooltip
+                self.tooltip.config(text=tooltip_text)
+                
+                # Get absolute screen coordinates for tooltip
+                x = self.winfo_rootx() + event.x + 10
+                y = self.winfo_rooty() + event.y + 10
+                
+                # Show tooltip
+                self.tooltip.place(x=x, y=y)
+                return
+                
+        # Hide tooltip if no note found
+        self.hide_tooltip(None)
+
+    def hide_tooltip(self, event):
+        """Hide the tooltip"""
+        self.tooltip.place_forget()
+
+    def add_note_visualization(self, note, start_time, duration, velocity):
+        """Add a note rectangle to the visualization"""
+        try:
+            # Get x position
+            note_x = self.get_note_x_position(note)
+            if note_x is None:
+                return None
+
+            # Create note name
+            note_name = NOTE_NAMES[note % 12] + str((note // 12) - 1)
+            
+            # Calculate y position and height with reduced scaling
+            y_pos = start_time * self.pixels_per_second
+            height = duration * 0.5  # Reduced from 5 to 0.5 pixels per second
+            
+            if height < 1:  # Ensure minimum height
+                height = 1
+            
+            # Invert y position for reversed order
+            y_pos = self.max_height - y_pos - height
+            
+            # Draw the note rectangle
+            rect_id = self.viz_canvas.create_rectangle(
+                note_x, y_pos,
+                note_x + self.note_width, y_pos + height,
+                fill=self.get_note_color(velocity),
+                outline="white",
+                tags=(f"note:{note_name}:{velocity}:{duration*1000:.1f}",)
+            )
+            
+            # Add note name label if height is sufficient
+            if height > 20:
+                self.viz_canvas.create_text(
+                    note_x + self.note_width/2, y_pos + height/2,
+                    text=note_name,
+                    fill="white",
+                    angle=90
+                )
+            
+            return rect_id
+            
+        except Exception as e:
+            print(f"Error drawing note {note}: {str(e)}")
+            return None
+
+    def draw_measure_lines(self):
+        """Draw horizontal lines for each measure based on time signature"""
+        if not hasattr(self, 'midi_file') or not self.midi_file:
+            return
+            
+        # Default to 4/4 time signature if not specified
+        ticks_per_beat = self.midi_file.ticks_per_beat
+        time_sig_numerator = 4
+        time_sig_denominator = 4
+        
+        # Look for time signature message
+        for track in self.midi_file.tracks:
+            for msg in track:
+                if msg.type == 'time_signature':
+                    time_sig_numerator = msg.numerator
+                    time_sig_denominator = msg.denominator
+                    break
+                    
+        # Calculate ticks per measure
+        ticks_per_measure = ticks_per_beat * 4 * time_sig_numerator / time_sig_denominator
+        
+        # Convert MIDI ticks to seconds for each measure
+        tempo = 500000  # Default tempo (microseconds per beat)
+        for track in self.midi_file.tracks:
+            for msg in track:
+                if msg.type == 'set_tempo':
+                    tempo = msg.tempo
+                    break
+                    
+        seconds_per_tick = tempo / (ticks_per_beat * 1000000)
+        seconds_per_measure = ticks_per_measure * seconds_per_tick
+        
+        # Draw measure lines
+        current_time = 0
+        canvas_width = self.viz_canvas.winfo_width()
+        
+        while current_time <= max(time for time, _ in self.midi_messages):
+            y_pos = current_time * self.pixels_per_second
+            y_pos = self.max_height - y_pos  # Invert position
+            
+            # Draw measure line
+            line_id = self.viz_canvas.create_line(
+                0, y_pos,
+                canvas_width, y_pos,
+                fill="#303030",  # Dark gray color
+                width=1,
+                dash=(2, 4)  # Dashed line pattern
+            )
+            
+            # Add measure number
+            measure_num = int(current_time / seconds_per_measure) + 1
+            self.viz_canvas.create_text(
+                10, y_pos - 5,
+                text=f"M{measure_num}",
+                fill="#505050",  # Medium gray color
+                anchor="sw",
+                font=("TkDefaultFont", 8)
+            )
+            
+            current_time += seconds_per_measure
+
+    def get_note_x_position(self, midi_note):
+        """Get x-position for a MIDI note with fixed positioning"""
+        try:
+            # Get canvas width
+            viz_width = self.viz_canvas.winfo_width()
+            if viz_width <= 0:
+                print(f"Invalid canvas width: {viz_width}")
+                return None
+            
+            # Calculate spacing - 88 notes on piano (21-108)
+            note_spacing = viz_width / 88
+            
+            # Calculate x position based on note index (0-87)
+            note_index = midi_note - 21  # Convert MIDI note (21-108) to index (0-87)
+            if not (0 <= note_index < 88):
+                print(f"Note index {note_index} out of range")
+                return None
+                
+            # Center note rectangle in its space
+            x_pos = note_index * note_spacing + (note_spacing - self.note_width) / 2
+            
+            return x_pos
+            
+        except Exception as e:
+            print(f"Error calculating x position: {str(e)}")
+            return None
+
+    def clear_visualization(self):
+        """Clear all visualized notes"""
+        if hasattr(self, 'viz_canvas') and self.viz_canvas.winfo_exists():
+            self.viz_canvas.delete("all")
+            self.max_height = 0
+
+    def get_note_color(self, velocity):
+        """Get color based on velocity"""
+        return f"#{int(velocity * 2):02x}00{int(255 - velocity * 2):02x}"
+
+    def on_viz_canvas_resize(self, event):
+        """Handle visualization canvas resize events"""
+        # Only handle if we have loaded MIDI messages
+        if hasattr(self, 'midi_messages') and self.midi_messages:
+            # Store current scroll position
+            current_scroll = self.viz_canvas.yview()
+            
+            # Calculate fixed width based on new canvas size
+            viz_width = event.width
+            note_spacing = viz_width / 88  # Divide available width by number of notes
+            self.note_width = min(15, note_spacing * 0.8)  # Adjust note width to fit spacing
+            
+            # Redraw all notes
+            self.visualize_midi_file()
+            
+            # Restore scroll position
+            self.viz_canvas.yview_moveto(current_scroll[0])
 
     def toggle_playback(self):
-        """Toggle MIDI file playback"""
+        """Toggle between play and pause states"""
+        if not hasattr(self, 'midi_messages') or not self.midi_messages:
+            return
+            
         if not self.is_playing:
-            self.is_playing = True
-            self.play_button.config(text="Pause")
-            self.last_message_time = time.time()
-            self.play_next_message()
+            self.start_playback()
         else:
-            self.is_playing = False
-            self.play_button.config(text="Play")
-
-    def stop_playback(self):
-        """Stop MIDI file playback"""
+            self.pause_playback()
+    
+    def start_playback(self):
+        """Start or resume MIDI playback"""
+        if not self.midi_output:
+            return
+            
+        self.is_playing = True
+        self.play_button.config(text="Pause")
+        
+        # If starting from beginning, reset playback index
+        if self.playback_index >= len(self.midi_messages):
+            self.playback_index = 0
+            self.last_message_time = 0
+        
+        self.process_next_message()
+    
+    def pause_playback(self):
+        """Pause MIDI playback"""
         self.is_playing = False
-        self.playback_index = 0
         self.play_button.config(text="Play")
+        # Send all notes off to prevent hanging notes
         self.send_all_notes_off()
-
-    def play_next_message(self):
-        """Play next MIDI message in sequence"""
+    
+    def stop_playback(self):
+        """Stop MIDI playback and reset to beginning"""
+        self.is_playing = False
+        self.play_button.config(text="Play")
+        self.playback_index = 0
+        self.last_message_time = 0
+        # Send all notes off to prevent hanging notes
+        self.send_all_notes_off()
+        # Reset visualization scroll to top
+        self.viz_canvas.yview_moveto(0.0)
+    
+    def process_next_message(self):
+        """Process the next MIDI message in the sequence"""
         if not self.is_playing or self.playback_index >= len(self.midi_messages):
             if self.playback_index >= len(self.midi_messages):
-                self.stop_playback()
+                self.stop_playback()  # Auto-stop at end
             return
+            
+        current_time, msg = self.midi_messages[self.playback_index]
         
-        current_time = time.time() - self.last_message_time
-        msg_time, msg = self.midi_messages[self.playback_index]
-        
-        if current_time >= msg_time:
-            if self.midi_output:
-                self.midi_output.send(msg)
-            self.playback_index += 1
-            self.after(1, self.play_next_message)
+        # Calculate delay until next message
+        if self.playback_index == 0:
+            delay = 0
         else:
-            # Schedule next check
-            self.after(1, self.play_next_message)
+            delay = (current_time - self.last_message_time) * 1000  # Convert to milliseconds
+        
+        # Send message after delay
+        def send_delayed_message():
+            if not self.is_playing:
+                return
+                
+            if msg.type in ['note_on', 'note_off']:
+                # Apply velocity scaling for note_on messages
+                if msg.type == 'note_on':
+                    velocity = int((msg.velocity * self.velocity_value.get()) / 100)
+                    msg_to_send = mido.Message('note_on', note=msg.note, velocity=velocity)
+                else:
+                    msg_to_send = msg
+                    
+                self.midi_output.send(msg_to_send)
+                
+                # Highlight active key
+                self.highlight_playing_key(msg.note, msg.type == 'note_on' and msg.velocity > 0)
+                
+                # Update visualization scroll position
+                self.update_visualization_scroll(current_time)
+            
+            self.last_message_time = current_time
+            self.playback_index += 1
+            self.process_next_message()
+        
+        self.after(int(delay), send_delayed_message)
+    
+    def highlight_playing_key(self, note, is_on):
+        """Highlight or unhighlight a key during playback"""
+        # Find the key_id for this note
+        key_id = None
+        for k, n in self.active_keys.items():
+            if n == note:
+                key_id = k
+                break
+        
+        if key_id:
+            if is_on:
+                self.canvas.itemconfig(key_id, fill="blue")
+            else:
+                original_color = self.key_colors[key_id]
+                self.canvas.itemconfig(key_id, fill=original_color)
+    
+    def update_visualization_scroll(self, current_time):
+        """Update visualization scroll position during playback"""
+        if not hasattr(self, 'viz_canvas'):
+            return
+            
+        # Calculate the position in the visualization
+        y_position = current_time * self.pixels_per_second
+        total_height = self.viz_canvas.winfo_height()
+        scroll_region = self.viz_canvas.bbox('all')
+        
+        if not scroll_region:
+            return
+            
+        # Calculate the fraction to scroll (inverted since visualization is bottom-up)
+        _, _, _, scroll_height = scroll_region
+        if scroll_height <= total_height:
+            return
+            
+        # Keep the playback position in the middle of the visible area
+        middle_offset = total_height / 2
+        target_y = y_position - middle_offset
+        
+        # Convert to scroll fraction (0 to 1)
+        scroll_fraction = max(0, min(1, target_y / (scroll_height - total_height)))
+        
+        # Apply scroll
+        self.viz_canvas.yview_moveto(1 - scroll_fraction)
+
+    def refresh_midi_ports(self):
+        """Refresh the list of available MIDI ports in the dropdowns"""
+        # Update input ports
+        input_ports = ["None"] + mido.get_input_names()
+        self.midi_input_dropdown['values'] = input_ports
+        
+        # Update output ports
+        output_ports = ["None"] + mido.get_output_names()
+        self.midi_output_dropdown['values'] = output_ports
+        
+        # Maintain current selections if they still exist in the port lists
+        if self.midi_input_var.get() not in input_ports:
+            self.midi_input_var.set("None")
+        if self.midi_output_var.get() not in output_ports:
+            self.midi_output_var.set("None")
+            
+    def start_midi_callback(self):
+        """Start the MIDI input callback loop"""
+        if self.midi_input:
+            try:
+                for msg in self.midi_input.iter_pending():
+                    self.on_midi_input(msg)
+            except Exception as e:
+                print(f"Error reading MIDI input: {e}")
+        
+        # Schedule next callback
+        self.after(1, self.start_midi_callback)
+
+    def periodic_port_refresh(self):
+        """Periodically refresh MIDI ports to detect changes"""
+        self.refresh_midi_ports()
+        self.after(5000, self.periodic_port_refresh)  # Check every 5 seconds
 
 if __name__ == "__main__":
     app = SynthesiaKeyboard()
